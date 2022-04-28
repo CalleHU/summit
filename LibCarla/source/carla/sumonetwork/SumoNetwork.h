@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "flat_hash_map.hpp"
+
 namespace carla {
 namespace sumonetwork {
 
@@ -80,14 +82,19 @@ public:
   geom::Vector2D BoundsMax() const { return _bounds_max; }
   geom::Vector2D OriginalBoundsMin() const { return _original_bounds_min; }
   geom::Vector2D OriginalBoundsMax() const { return _original_bounds_max; }
-  const std::unordered_map<std::string, Edge>& Edges() const { return _edges; }
+  const ska::flat_hash_map<std::string, Edge>& Edges() const { return _edges; }
   const std::unordered_map<std::string, Junction>& Junctions() const { return _junctions; }
   const std::vector<Connection>& Connections() const { return _connections; }
 
   geom::Vector2D GetRoutePointPosition(const RoutePoint& route_point) const;
   RoutePoint GetNearestRoutePoint(const geom::Vector2D& position) const;
+  RoutePoint GetNearestRoutePointOnLane(const geom::Vector2D& position, RoutePoint poute_point) const;
   std::vector<RoutePoint> GetNextRoutePoints(const RoutePoint& route_point, float distance) const;
+  std::vector<geom::Vector2D> GetNextRoutePointsPositions(const RoutePoint& route_point, float distance) const;
+  RoutePoint GetNextRoutePoint(const RoutePoint& route_point, float distance) const;
+  geom::Vector2D GetNextRoutePointPosition(const RoutePoint& route_point, float distance) const;
   std::vector<std::vector<RoutePoint>> GetNextRoutePaths(const RoutePoint& route_point, size_t num_points, float interval) const;
+  uint32_t GetNearestLane(const RoutePoint& route_point, const geom::Vector2D& position) const;
 
   occupancy::OccupancyMap CreateOccupancyMap() const;
   occupancy::OccupancyMap CreateRoadmarkOccupancyMap() const;
@@ -107,7 +114,7 @@ private:
   geom::Vector2D _original_bounds_min;
   geom::Vector2D _original_bounds_max;
 
-  std::unordered_map<std::string, Edge> _edges;
+  ska::flat_hash_map<std::string, Edge> _edges;
   std::unordered_map<std::string, Junction> _junctions;
   std::vector<Connection> _connections;
 

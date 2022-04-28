@@ -1,4 +1,5 @@
 #include "SumoNetwork.h"
+#include <cmath>
 #include "carla/geom/Math.h"
 #include "carla/geom/Triangulation.h"
 #include <boost/algorithm/string.hpp>
@@ -186,8 +187,9 @@ void SumoNetwork::Build() {
 }
   
 geom::Vector2D SumoNetwork::GetRoutePointPosition(const RoutePoint& route_point) const {
-  const geom::Vector2D& start = _edges.at(route_point.edge).lanes[route_point.lane].shape[route_point.segment];
-  const geom::Vector2D& end = _edges.at(route_point.edge).lanes[route_point.lane].shape[route_point.segment + 1];
+  const Edge& edge = _edges.at(route_point.edge);
+  const geom::Vector2D& start = edge.lanes[route_point.lane].shape[route_point.segment];
+  const geom::Vector2D& end = edge.lanes[route_point.lane].shape[route_point.segment + 1];
   return start + route_point.offset * (end - start).MakeUnitVector();
 }
   
@@ -215,7 +217,58 @@ RoutePoint SumoNetwork::GetNearestRoutePoint(const geom::Vector2D& position) con
     std::get<2>(result.second),
     t};
 }
-  
+
+RoutePoint SumoNetwork::GetNearestRoutePointOnLane(const geom::Vector2D& position, RoutePoint route_point) const {
+  const Edge& edge = _edges.at(route_point.edge);
+  const Lane& lane = edge.lanes[route_point.lane];
+
+  const geom::Vector2D& segment_start = lane.shape[route_point.segment];
+  const geom::Vector2D& segment_end = lane.shape[route_point.segment + 1];
+
+  float segment_length = (segment_end - segment_start).Length();
+  geom::Vector2D direction = (segment_end - segment_start) / segment_length;
+  float t = geom::Vector2D::DotProduct(
+      position - segment_start,
+      direction);
+
+  // TODO HANDLE START AND END OF SEGMENT
+  while (true) {
+    if (t < 0) {
+      const geom::Vector2D& segment_start = lane.shape[route_point.segment - 1];
+      const geom::Vector2D& segment_end = lane.shape[route_point.segment];
+
+      segment_length = (segment_end - segment_start).Length();
+      direction = (segment_end - segment_start) / segment_length;
+      t = geom::Vector2D::DotProduct(
+          position - segment_start,
+          direction);
+      if (t >= segment_length) {
+        route_point.offset = 0;
+        break;
+      } else {
+        route_point.segment -= 1;
+      }
+    } else if (t > segment_length) {
+      route_point.segment += 1;
+      const geom::Vector2D& segment_start = lane.shape[route_point.segment];
+      const geom::Vector2D& segment_end = lane.shape[route_point.segment + 1];
+
+      segment_length = (segment_end - segment_start).Length();
+      direction = (segment_end - segment_start) / segment_length;
+      t = geom::Vector2D::DotProduct(
+          position - segment_start,
+          direction);
+      if (t <= 0) {
+        route_point.offset = 0;
+        break;
+      }
+    } else {
+      route_point.offset = t;
+      break;
+    }
+  }
+  return route_point;
+}
 std::vector<RoutePoint> SumoNetwork::GetNextRoutePoints(const RoutePoint& route_point, float distance) const {
   const Edge& edge = _edges.at(route_point.edge);
   const Lane& lane = edge.lanes[route_point.lane];
@@ -252,6 +305,117 @@ std::vector<RoutePoint> SumoNetwork::GetNextRoutePoints(const RoutePoint& route_
   }
 }
 
+std::vector<geom::Vector2D> SumoNetwork::GetNextRoutePointsPositions(const RoutePoint& route_point, float distance) const {
+  const Edge& edge = _edges.at(route_point.edge);
+  const Lane& lane = edge.lanes[route_point.lane];
+
+  const geom::Vector2D& segment_start = lane.shape[route_point.segment];
+  const geom::Vector2D& segment_end = lane.shape[route_point.segment + 1];
+  const float segment_length = (segment_end - segment_start).Length();
+
+  if (route_point.offset + distance <= segment_length) {
+    return { segment_start + (route_point.offset + distance) * (segment_end - segment_start) / segment_length };
+  } else if (route_point.segment < lane.shape.size() - 2) {
+    return GetNextRoutePointsPositions(
+        RoutePoint{route_point.edge, route_point.lane, route_point.segment + 1, 0},
+        distance - (segment_length - route_point.offset));
+  } else {
+    std::vector<geom::Vector2D> next_route_points_position;
+    for (size_t connection_index : _outgoing_connections_map.at(lane.id)) {
+      const Connection& connection = _connections[connection_index];
+      if (connection.via == "") {
+        std::vector<geom::Vector2D> results = GetNextRoutePointsPositions(
+            RoutePoint{connection.to, connection.to_lane, 0, 0},
+            distance - (segment_length - route_point.offset));
+        next_route_points_position.insert(next_route_points_position.end(), results.begin(), results.end());
+      } else {
+        const std::pair<std::string, uint32_t>& lane_parent = _lane_to_parent_edge_map.at(connection.via);
+        std::vector<geom::Vector2D> results = GetNextRoutePointsPositions(
+            RoutePoint{lane_parent.first, lane_parent.second, 0, 0},
+            distance - (segment_length - route_point.offset));
+        next_route_points_position.insert(next_route_points_position.end(), results.begin(), results.end());
+      }
+    }
+
+    return next_route_points_position;
+  }
+}
+
+/* Return the next route point, undefined behavior if there are multiple next
+ * route points.
+ */
+RoutePoint SumoNetwork::GetNextRoutePoint(const RoutePoint& route_point, float distance) const {
+  const Edge& edge = _edges.at(route_point.edge);
+  const Lane& lane = edge.lanes[route_point.lane];
+
+  const geom::Vector2D& segment_start = lane.shape[route_point.segment];
+  const geom::Vector2D& segment_end = lane.shape[route_point.segment + 1];
+  float segment_length = (segment_end - segment_start).Length();
+
+  if (route_point.offset + distance <= segment_length) {
+    return {route_point.edge, route_point.lane, route_point.segment, route_point.offset + distance};
+  } else if (route_point.segment < lane.shape.size() - 2) {
+    return GetNextRoutePoint(
+        RoutePoint{route_point.edge, route_point.lane, route_point.segment + 1, 0},
+        distance - (segment_length - route_point.offset));
+  } else {
+    RoutePoint next_route_point;
+    for (size_t connection_index : _outgoing_connections_map.at(lane.id)) {
+      const Connection& connection = _connections[connection_index];
+      if (connection.via == "") {
+        next_route_point = GetNextRoutePoint(
+            RoutePoint{connection.to, connection.to_lane, 0, 0},
+            distance - (segment_length - route_point.offset));
+        break;
+      } else {
+        const std::pair<std::string, uint32_t>& lane_parent = _lane_to_parent_edge_map.at(connection.via);
+        next_route_point = GetNextRoutePoint(
+            RoutePoint{lane_parent.first, lane_parent.second, 0, 0},
+            distance - (segment_length - route_point.offset));
+        break;
+      }
+    }
+
+    return next_route_point;
+  }
+}
+
+geom::Vector2D SumoNetwork::GetNextRoutePointPosition(const RoutePoint& route_point, float distance) const {
+  const Edge& edge = _edges.at(route_point.edge);
+  const Lane& lane = edge.lanes[route_point.lane];
+
+  const geom::Vector2D& segment_start = lane.shape[route_point.segment];
+  const geom::Vector2D& segment_end = lane.shape[route_point.segment + 1];
+  const float segment_length = (segment_end - segment_start).Length();
+
+  if (route_point.offset + distance <= segment_length) {
+    return segment_start + (route_point.offset + distance) * (segment_end - segment_start) / segment_length;
+  } else if (route_point.segment < lane.shape.size() - 2) {
+    return GetNextRoutePointPosition(
+        RoutePoint{route_point.edge, route_point.lane, route_point.segment + 1, 0},
+        distance - (segment_length - route_point.offset));
+  } else {
+    geom::Vector2D next_route_point_position;
+    for (size_t connection_index : _outgoing_connections_map.at(lane.id)) {
+      const Connection& connection = _connections[connection_index];
+      if (connection.via == "") {
+        next_route_point_position = GetNextRoutePointPosition(
+            RoutePoint{connection.to, connection.to_lane, 0, 0},
+            distance - (segment_length - route_point.offset));
+        break;
+      } else {
+        const std::pair<std::string, uint32_t>& lane_parent = _lane_to_parent_edge_map.at(connection.via);
+        next_route_point_position = GetNextRoutePointPosition(
+            RoutePoint{lane_parent.first, lane_parent.second, 0, 0},
+            distance - (segment_length - route_point.offset));
+        break;
+      }
+    }
+    return next_route_point_position;
+  }
+}
+
+
 std::vector<std::vector<RoutePoint>> SumoNetwork::GetNextRoutePaths(const RoutePoint& route_point, size_t num_points, float interval) const {
   if (num_points == 0) return {{route_point}};
 
@@ -269,6 +433,26 @@ std::vector<std::vector<RoutePoint>> SumoNetwork::GetNextRoutePaths(const RouteP
   return result;
 }
 
+uint32_t SumoNetwork::GetNearestLane(const RoutePoint& route_point, const geom::Vector2D& position) const {
+  const Edge& edge = _edges.at(route_point.edge);
+  float min_dist = std::numeric_limits<float>::max();
+  uint32_t min_dist_ix;
+  for (size_t i = 0; i < edge.lanes.size(); i++) {
+    const Lane& lane = edge.lanes[i];
+    const geom::Vector2D& segment_start = lane.shape[route_point.segment];
+    const geom::Vector2D& segment_end = lane.shape[route_point.segment + 1];
+
+    const geom::Vector2D direction = (segment_end - segment_start).MakeUnitVector();
+    const geom::Vector2D offset = position - segment_start;
+    const float lat_dist = std::fabs(direction.x * offset.y - direction.y * offset.x);
+    if (lat_dist < min_dist) {
+      min_dist = lat_dist;
+      min_dist_ix = i;
+    }
+  }
+  return min_dist_ix;
+}
+
 occupancy::OccupancyMap SumoNetwork::CreateOccupancyMap() const {
   occupancy::OccupancyMap occupancy_map;
 
@@ -279,7 +463,7 @@ occupancy::OccupancyMap SumoNetwork::CreateOccupancyMap() const {
       occupancy_map = occupancy_map.Union(occupancy::OccupancyMap(lane.shape, 4.10f));
     }
   }
-  
+
   for (const auto& junction_entry : _junctions) {
     const Junction& junction = junction_entry.second;
     occupancy_map = occupancy_map.Union(occupancy::OccupancyMap(junction.shape));
@@ -287,7 +471,7 @@ occupancy::OccupancyMap SumoNetwork::CreateOccupancyMap() const {
 
   return occupancy_map;
 }
-  
+
 occupancy::OccupancyMap SumoNetwork::CreateRoadmarkOccupancyMap() const {
   occupancy::OccupancyMap roadmark_occupancy_map;
   for (const auto& edge_entry : _edges) {
@@ -296,7 +480,7 @@ occupancy::OccupancyMap SumoNetwork::CreateRoadmarkOccupancyMap() const {
       roadmark_occupancy_map = roadmark_occupancy_map.Union(occupancy::OccupancyMap(lane.shape, 4.00f, 0.10f));
     }
   }
-  
+
   occupancy::OccupancyMap junction_occupancy_map;
   for (const auto& junction_entry : _junctions) {
     const Junction& junction = junction_entry.second;
